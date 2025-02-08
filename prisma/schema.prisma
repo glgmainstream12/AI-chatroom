@@ -1,0 +1,128 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model AIService {
+  id             String       @id
+  name           String
+  apiKey         String
+  baseUrl        String
+  enabled        Boolean      @default(true)
+  modelEndpoints Json?
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime
+  AIUsageLog     AIUsageLog[]
+}
+
+model AIUsageLog {
+  id           String    @id
+  userId       String?
+  aiServiceId  String
+  prompt       String?
+  tokensUsed   Int
+  responseTime Int
+  status       String
+  createdAt    DateTime  @default(now())
+  AIService    AIService @relation(fields: [aiServiceId], references: [id])
+  User         User?     @relation(fields: [userId], references: [id])
+}
+
+model Chat {
+  id        String   @id
+  userId    String
+  title     String?
+  content   Json?
+  createdAt DateTime @default(now())
+  updatedAt DateTime
+  User      User     @relation(fields: [userId], references: [id])
+}
+
+model ChatSession {
+  id        String   @id
+  messages  Json?
+  createdAt DateTime @default(now())
+  updatedAt DateTime
+}
+
+model Conversation {
+  id        String   @id @default(uuid())
+  userId    String
+  createdAt DateTime @default(now())
+  Message   Message[]
+
+  User      User     @relation(fields: [userId], references: [id])
+}
+
+model Message {
+  id             String       @id @default(uuid()) // <--- add this
+  createdAt      DateTime     @default(now())
+  role           String
+  content        String
+  conversationId String
+  Conversation   Conversation @relation(fields: [conversationId], references: [id])
+
+    fileUrl        String?
+}
+
+model Subscription {
+  id           String             @id @default(uuid())
+  orderId      String?             @unique
+  userId       String
+  planType     PlanType
+  amount       Int
+  status       SubscriptionStatus
+  paymentToken String?
+  createdAt    DateTime           @default(now())
+  updatedAt    DateTime           @updatedAt
+  User         User               @relation(fields: [userId], references: [id])
+}
+
+model User {
+  id                 String       @id @default(uuid())
+  email              String       @unique
+  password           String
+  name               String?
+  role               UserRole     @default(USER)
+  planType           PlanType     @default(FREE)
+  tokenUsed          Int          @default(0)
+  tokenResetAt       DateTime?
+  subscriptionEnd    DateTime?
+  createdAt          DateTime     @default(now())
+  updatedAt          DateTime     @updatedAt
+  emailVerified      DateTime?    // New: Track email verification
+  lastLoginAt        DateTime?    // New: Track last login
+  failedLoginAttempts Int         @default(0) // New: Track failed login attempts
+  lockedUntil        DateTime?    // New: Account lockout timestamp
+  refreshToken       String?      @unique // Added unique constraint
+  passwordResetToken String?      @unique // New: Password reset functionality
+  passwordResetExpires DateTime?  // New: Password reset expiration
+  AIUsageLog         AIUsageLog[]
+  Chat               Chat[]
+  Subscription       Subscription[]
+
+  @@index([email]) // Added index for faster lookups
+  Conversation Conversation[]
+}
+
+enum PlanType {
+  FREE
+  STUDENT
+  PREMIUM
+}
+
+enum SubscriptionStatus {
+  PENDING
+  ACTIVE
+  FAILED
+}
+
+enum UserRole {
+  USER
+  ADMIN
+  SUPERADMIN
+}

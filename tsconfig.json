@@ -1,0 +1,21 @@
+{
+    "compilerOptions": {
+      "target": "es2016",
+      "module": "commonjs",
+      "outDir": "./dist",
+      "resolveJsonModule": true,
+      "allowSyntheticDefaultImports": true,
+      "esModuleInterop": true,
+      "forceConsistentCasingInFileNames": true,
+      "strict": true,
+      "skipLibCheck": true,
+      "typeRoots": [
+        "./node_modules/@types",
+        "./src/types" // or wherever your express.d.ts is located
+      ]
+    },
+    "include": [
+      "src",         // Make sure this includes controllers/services
+      "src/types"    // Make sure it includes your express.d.ts
+    ]
+  }
