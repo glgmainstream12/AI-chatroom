@@ -27,6 +27,7 @@ model AIUsageLog {
   tokensUsed   Int
   responseTime Int
   status       String
+  cost         Float     @default(0)  // Add this field
   createdAt    DateTime  @default(now())
   AIService    AIService @relation(fields: [aiServiceId], references: [id])
   User         User?     @relation(fields: [userId], references: [id])
@@ -37,6 +38,7 @@ model Chat {
   userId    String
   title     String?
   content   Json?
+  isLocalOnly   Boolean   @default(false)  // New field
   createdAt DateTime @default(now())
   updatedAt DateTime
   User      User     @relation(fields: [userId], references: [id])
@@ -101,6 +103,8 @@ model User {
   refreshToken       String?      @unique // Added unique constraint
   passwordResetToken String?      @unique // New: Password reset functionality
   passwordResetExpires DateTime?  // New: Password reset expiration
+  totalTokensUsed Int     @default(0)  // Add this field
+  totalCostUSD    Float   @default(0)  // Add this field
   AIUsageLog         AIUsageLog[]
   Chat               Chat[]
   Subscription       Subscription[]

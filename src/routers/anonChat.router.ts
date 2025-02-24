@@ -47,7 +47,7 @@ router.delete(
  * Query params:
  *   - model: "gpt-3.5-turbo" | "sonar-reasoning-pro" (default: "gpt-3.5-turbo")
  */
-router.post(
+router.get(
   "/conversation/:conversationId/stream",
   AnonymousChatController.streamAnonymousCompletion
 );
@@ -58,10 +58,10 @@ router.post(
  * Query params:
  *   - maxAge: number (hours, default: 24)
  */
-router.post(
-  "/cleanup",
-  // This route should be protected by admin middleware in production
-  AnonymousChatController.cleanupOldConversations
-);
+// router.post(
+//   "/cleanup",
+//   // This route should be protected by admin middleware in production
+//   AnonymousChatController.cleanupOldConversations
+// );
 
 export default router;

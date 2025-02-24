@@ -5,8 +5,8 @@ import rateLimit from "express-rate-limit";
 
 // Rate limiting configuration for anonymous users
 export const anonymousLimiter = rateLimit({
-  windowMs: 1, // 15 minutes
-  max: 20, // Limit each IP to 3 requests per window
+  windowMs: 6000* 15, // 15 minutes
+  max: 10, // Limit each IP to 3 requests per window
   message: { error: "Rate limit exceeded. Please wait 15 minutes or sign in for more requests." },
   standardHeaders: true,
   legacyHeaders: false,

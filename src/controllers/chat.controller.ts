@@ -15,10 +15,10 @@ export class ChatController {
       const authReq = req as AuthRequest;
       const { conversationId } = req.params;
 
-      // Pass the logged-in user's id if available
       const conversation = await ChatService.getOrCreateConversation(
         conversationId,
-        authReq.user?.id
+        authReq.user?.id,
+        false // isLocalOnly?
       );
       res.json(conversation);
     } catch (error) {
@@ -40,7 +40,7 @@ export class ChatController {
         return;
       }
 
-      const message = await ChatService.addUserMessage(conversationId, content);
+      const message = await ChatService.addUserMessage(conversationId, content, false);
       res.json(message);
     } catch (error) {
       console.error("[ChatController] Error in addUserMessage:", error);
@@ -54,15 +54,10 @@ export class ChatController {
   static getMessagesForConversation: RequestHandler = async (req, res) => {
     try {
       const { conversationId } = req.params;
-      const messages = await ChatService.getMessagesForConversation(
-        conversationId
-      );
+      const messages = await ChatService.getMessagesForConversation(conversationId, false);
       res.json(messages);
     } catch (error) {
-      console.error(
-        "[ChatController] Error in getMessagesForConversation:",
-        error
-      );
+      console.error("[ChatController] Error in getMessagesForConversation:", error);
       res.status(500).json({ error: "Internal server error" });
     }
   };
@@ -73,7 +68,7 @@ export class ChatController {
   static resetConversation: RequestHandler = async (req, res) => {
     try {
       const { conversationId } = req.params;
-      await ChatService.resetConversation(conversationId);
+      await ChatService.resetConversation(conversationId, false);
       res.json({ message: "Conversation reset successfully" });
     } catch (error) {
       console.error("[ChatController] Error in resetConversation:", error);
@@ -85,11 +80,11 @@ export class ChatController {
    * Stream AI completion (SSE)
    */
   static streamChatCompletion: RequestHandler = async (req, res) => {
-    try {
-      const authReq = req as AuthRequest;
-      const { conversationId } = req.params;
-      const model = (req.query.model as string) || "gpt-4o";
+    const authReq = req as AuthRequest;
+    const { conversationId } = req.params;
+    const model = (req.query.model as string) || "gpt-4o";
 
+    try {
       // Set SSE headers
       res.setHeader("Content-Type", "text/event-stream");
       res.setHeader("Cache-Control", "no-cache");
@@ -102,21 +97,36 @@ export class ChatController {
         model
       );
 
+      // Start streaming
       await ChatService.streamChatCompletion(
         authReq,
         res,
         conversationId,
         (token: string) => {
           console.log("[ChatController] Sending token to frontend:", token);
+          // SSE data event
           res.write(`data: ${token}\n\n`);
         },
-        model
+        model,
+        false // isLocalOnly
       );
 
+      // Done streaming => close
       res.end();
     } catch (error) {
       console.error("[ChatController] Error in streamChatCompletion:", error);
-      res.status(500).json({ error: "Internal server error" });
+    
+      // If no SSE data has been sent yet, we can still do a normal 500 JSON
+      if (!res.headersSent) {
+        res.status(500).json({ error: "Internal server error" });
+      } else {
+        // SSE already started => send SSE error event or a final message
+        // Narrow the type:
+        const errorMessage = error instanceof Error ? error.message : String(error);
+    
+        res.write(`event: error\ndata: ${errorMessage}\n\n`);
+        res.end();
+      }
     }
   };
 
@@ -125,7 +135,7 @@ export class ChatController {
    */
   static getAllConversations: RequestHandler = async (req, res) => {
     try {
-      const conversations = await ChatService.getAllConversations();
+      const conversations = await ChatService.getAllConversations(false);
       res.json(conversations);
     } catch (error) {
       console.error("[ChatController] Error in getAllConversations:", error);
@@ -147,7 +157,7 @@ export class ChatController {
 
       if (!conversation) {
         res.status(404).json({ error: "Conversation not found" });
-        return; // Explicitly return void
+        return;
       }
 
       // Check ownership
@@ -155,7 +165,7 @@ export class ChatController {
         res
           .status(403)
           .json({ error: "Forbidden: You do not own this conversation" });
-        return; // Explicitly return void
+        return;
       }
 
       res.json(conversation);

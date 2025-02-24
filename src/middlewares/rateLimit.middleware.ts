@@ -4,43 +4,17 @@ import prisma from "../prisma/client";
 import { differenceInMinutes } from "date-fns";
 import { AuthRequest } from "./auth.middleware";
 
-// For visitors: a simple in-memory map of ip => { count, lastResetAt }
-const visitorUsageMap = new Map<string, { count: number; lastResetAt: Date }>();
-
 export const rateLimit: RequestHandler = async (req, res, next): Promise<void> => {
   try {
     const authReq = req as AuthRequest;
 
-    // 1) If no user => treat as visitor
+    // Ensure the request is authenticated
     if (!authReq.user) {
-      const visitorIp = req.ip || "unknown_ip";
-
-      if (!visitorUsageMap.has(visitorIp)) {
-        visitorUsageMap.set(visitorIp, { count: 0, lastResetAt: new Date() });
-      }
-      const visitorData = visitorUsageMap.get(visitorIp)!;
-
-      const minutesSinceReset = differenceInMinutes(
-        new Date(),
-        visitorData.lastResetAt
-      );
-
-      if (minutesSinceReset >= 30) {
-        visitorData.count = 0;
-        visitorData.lastResetAt = new Date();
-      }
-
-      if (visitorData.count >= 5) {
-        res.status(429).json({ error: "Visitor rate limit exceeded. Please wait or login." });
-        return; // ✅ Ensure we return void
-      }
-
-      visitorData.count++;
-      next();
-      return; // ✅ Ensure void return
+      res.status(401).json({ error: "Authentication required" });
+      return;
     }
 
-    // 2) Authenticated user => fetch from DB
+    // Fetch the user from the database
     const user = await prisma.user.findUnique({
       where: { id: authReq.user.id },
     });
@@ -50,16 +24,16 @@ export const rateLimit: RequestHandler = async (req, res, next): Promise<void> =
       return;
     }
 
-    // Plan logic
+    // Premium users have no rate limit
     if (user.planType === "PREMIUM") {
       next();
       return;
     }
 
-    // Free or Student => 15 prompts / 30 min
+    // Free or Student users are limited to 15 prompts per 30 minutes
     const maxAllowed = 15;
 
-    // Check if we should reset usage
+    // Check if token usage should be reset
     const shouldReset =
       !user.tokenResetAt ||
       differenceInMinutes(new Date(), user.tokenResetAt) >= 30;
@@ -94,6 +68,6 @@ export const rateLimit: RequestHandler = async (req, res, next): Promise<void> =
   } catch (error) {
     console.error("[rateLimit] Error:", error);
     res.status(500).json({ error: "Internal server error" });
-    return; // ✅ Ensure we return void
+    return;
   }
 };

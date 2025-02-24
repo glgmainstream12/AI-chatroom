@@ -12,6 +12,7 @@ import {
 } from "../services/auth.service";
 import jwt from "jsonwebtoken";
 import { rateLimit } from "express-rate-limit";
+import { sendForgotPasswordEmail } from "../services/email.service";
 
 // Rate limiting for auth endpoints
 export const authLimiter = rateLimit({
@@ -138,13 +139,20 @@ export async function forgotPassword(req: Request, res: Response): Promise<void>
       return;
     }
 
+    // 1. Generate the token
     const resetToken = await generatePasswordResetToken(email);
-    
-    // In a real application, send this token via email
-    // For development, we'll return it in the response
-    res.json({ 
-      message: "Password reset token generated",
-      resetToken // Remove this in production
+
+    // 2. Construct your password-reset URL for the frontend
+    //    e.g., "https://frontend-domain/reset?token=..."
+    //    Or you could pass the token in the URL path, i.e. /reset/...
+    const resetLink = `https://YOUR_FRONTEND_DOMAIN/reset?token=${resetToken}`;
+
+    // 3. Send Email via AWS SES
+    await sendForgotPasswordEmail(email, resetLink);
+
+    // 4. Return a success response
+    res.json({
+      message: "Password reset email sent. Please check your inbox.",
     });
   } catch (error: any) {
     res.status(400).json({ error: error.message });

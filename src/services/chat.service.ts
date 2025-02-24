@@ -1,57 +1,100 @@
 // server/services/chatService.ts
-import OpenAI from "openai";
-import prisma from "../prisma/client";
 import { Response } from "express";
+import prisma from "../prisma/client";
 import { AuthRequest } from "../middlewares/auth.middleware";
+import { getAIProviderForModel } from "../model/aiProviders";
+import { TokenTrackingService } from "./tokenTracing.service";
 
-// Just a quick log to verify the presence of the API key. (Don't log the key itself in production!)
-if (process.env.OPENAI_API_KEY) {
-  console.log(
-    "[ChatService] OPENAI_API_KEY is set (length:",
-    process.env.OPENAI_API_KEY.length,
-    ")"
-  );
-} else {
-  console.log("[ChatService] No OPENAI_API_KEY found in environment variables!");
+/**
+ * DBMessage represents the shape of your Prisma "Message" model row.
+ */
+export interface DBMessage {
+  id: string;
+  conversationId: string;
+  role: string; // "user" | "assistant" | "system"
+  content: string;
+  createdAt?: Date;
 }
 
-// Initialize the OpenAI client
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
+/**
+ * ChatMessage is the shape you pass to AI providers.
+ * Note that Anthropic and others require "user" | "assistant" only;
+ * you may map "system" to "assistant".
+ */
+export interface ChatMessage {
+  role: "user" | "assistant" | "system";
+  content: string;
+  timestamp: Date;
+}
 
-// Initialize the Perplexity client
-const perplexity = new OpenAI({
-  apiKey: process.env.PERPLEXITY_API_KEY,
-  baseURL: "https://api.perplexity.ai",
-});
+export interface LocalStorageChat {
+  id: string;
+  messages: ChatMessage[];
+  title?: string;
+  createdAt: Date;
+  updatedAt: Date;
+}
 
+// Additional local-only interface
+export interface LocalConversation {
+  id: string;
+  userId: string;
+  messages: ChatMessage[];
+  createdAt: Date;
+}
+
+// Enhanced ChatService
 export class ChatService {
+  private static LOCAL_STORAGE_KEY = 'local_conversations';
+
   /**
-   * Retrieve or create a new Conversation by ID.
-   * If conversationId is not provided or doesn't exist, we create a new one.
-   * 
-   * **Note:** This code assumes your Prisma schema for Conversation
-   * has a `userId` field.
+   * Get or create a conversation, either locally or in DB.
    */
-  static async getOrCreateConversation(conversationId?: string, userId?: string) {
-    if (!conversationId) {
-      // Creating a new conversation with the current user's ID.
-      const newConv = await prisma.conversation.create({
-        data: {
-          userId: userId || "", // ensure your schema requires a non-empty string or handle accordingly
-        },
-      });
-      return newConv;
+  static async getOrCreateConversation(
+    conversationId?: string,
+    userId?: string,
+    isLocalOnly: boolean = false
+  ) {
+    if (isLocalOnly) {
+      if (!conversationId) {
+        // Create new local conversation
+        const newConversation: LocalConversation = {
+          id: crypto.randomUUID(),
+          userId: userId || "",
+          messages: [],
+          createdAt: new Date()
+        };
+        this.saveLocalConversation(newConversation);
+        return newConversation;
+      }
+
+      // Get existing local conversation
+      const conversation = this.getLocalConversation(conversationId);
+      if (conversation) return conversation;
+
+      // Create new local conversation with provided ID
+      const newLocal: LocalConversation = {
+        id: conversationId,
+        userId: userId || "",
+        messages: [],
+        createdAt: new Date()
+      };
+      this.saveLocalConversation(newLocal);
+      return newLocal;
     }
-  
-    // If conversationId is provided, try to fetch it
+
+    // ------ Original DB logic -------
+    if (!conversationId) {
+      return await prisma.conversation.create({
+        data: { userId: userId || "" },
+      });
+    }
+
     let conversation = await prisma.conversation.findUnique({
       where: { id: conversationId },
     });
-  
+
     if (!conversation) {
-      // Create the conversation with the given conversationId and assign userId
       conversation = await prisma.conversation.create({
         data: {
           id: conversationId,
@@ -59,210 +102,225 @@ export class ChatService {
         },
       });
     }
-  
     return conversation;
   }
 
   /**
-   * Save the user's message to the DB.
+   * Add a user message
    */
-  static async addUserMessage(conversationId: string, content: string) {
-    console.log(
-      "[ChatService] addUserMessage => conversationId:",
-      conversationId,
-      " content:",
-      content
-    );
+  static async addUserMessage(
+    conversationId: string,
+    content: string,
+    isLocalOnly: boolean = false
+  ) {
+    if (isLocalOnly) {
+      const conversation = this.getLocalConversation(conversationId);
+      if (!conversation) throw new Error("Conversation not found");
 
-    const userMsg = await prisma.message.create({
+      const message: ChatMessage = {
+        role: "user",
+        content,
+        timestamp: new Date()
+      };
+
+      conversation.messages.push(message);
+      this.saveLocalConversation(conversation);
+      return message;
+    }
+
+    // ---- DB logic ----
+    console.log("[ChatService] addUserMessage =>", { conversationId, content });
+    return await prisma.message.create({
       data: {
         conversationId,
         role: "user",
-        content: content,
+        content,
       },
     });
-
-    console.log("[ChatService] User message created with ID:", userMsg.id);
-    return userMsg;
   }
 
   /**
-   * Retrieve all messages for a conversation in ascending order.
+   * Add an assistant message
    */
-  static async getMessagesForConversation(conversationId: string) {
-    console.log(
-      "[ChatService] getMessagesForConversation => conversationId:",
-      conversationId
-    );
+  static async addAssistantMessage(
+    conversationId: string,
+    content: string,
+    isLocalOnly: boolean = false
+  ) {
+    if (isLocalOnly) {
+      const conversation = this.getLocalConversation(conversationId);
+      if (!conversation) throw new Error("Conversation not found");
 
-    const msgs = await prisma.message.findMany({
-      where: { conversationId },
-      orderBy: { createdAt: "asc" },
-    });
+      const message: ChatMessage = {
+        role: "assistant",
+        content,
+        timestamp: new Date()
+      };
 
-    console.log(
-      `[ChatService] Found ${msgs.length} messages in conversationId: ${conversationId}`
-    );
-    return msgs;
-  }
+      conversation.messages.push(message);
+      this.saveLocalConversation(conversation);
+      return message;
+    }
 
-  /**
-   * Save the assistant's message to the DB.
-   */
-  static async addAssistantMessage(conversationId: string, content: string) {
-    console.log(
-      "[ChatService] addAssistantMessage => conversationId:",
-      conversationId,
-      " content length:",
-      content.length
-    );
-
-    const assistantMsg = await prisma.message.create({
+    // ---- DB logic ----
+    console.log("[ChatService] addAssistantMessage =>", { conversationId });
+    return await prisma.message.create({
       data: {
         conversationId,
         role: "assistant",
-        content: content,
+        content,
       },
     });
-
-    console.log(
-      "[ChatService] Assistant message created with ID:",
-      assistantMsg.id
-    );
-    return assistantMsg;
   }
 
   /**
-   * Delete all messages and the conversation itself (for "reset").
+   * Retrieve messages from local or DB
    */
-  static async resetConversation(conversationId: string) {
-    console.log("[ChatService] resetConversation => conversationId:", conversationId);
+  static async getMessagesForConversation(
+    conversationId: string,
+    isLocalOnly: boolean = false
+  ) {
+    if (isLocalOnly) {
+      const conversation = this.getLocalConversation(conversationId);
+      return conversation?.messages || [];
+    }
+
+    console.log("[ChatService] getMessagesForConversation =>", conversationId);
+    return prisma.message.findMany({
+      where: { conversationId },
+      orderBy: { createdAt: "asc" },
+    });
+  }
+
+  /**
+   * Reset (delete) a conversation
+   */
+  static async resetConversation(conversationId: string, isLocalOnly: boolean = false) {
+    if (isLocalOnly) {
+      this.deleteLocalConversation(conversationId);
+      return;
+    }
+
+    console.log("[ChatService] resetConversation =>", conversationId);
     await prisma.message.deleteMany({ where: { conversationId } });
     await prisma.conversation.delete({ where: { id: conversationId } });
-    console.log("[ChatService] Conversation reset completed.");
   }
 
   /**
-   * Stream a chat completion using the conversation's message history.
-   * 
-   * @param req The request (typed as AuthRequest so req.user exists)
-   * @param res The response
-   * @param conversationId The ID of the conversation
-   * @param onToken Callback to receive each partial token (assistant content)
-   * @param model The model to use (defaults to "gpt-4o")
-   *
-   * The method:
-   * 1) Fetches existing messages from DB and transforms them for OpenAI.
-   * 2) Calls the appropriate API with streaming enabled.
-   * 3) Iterates over each chunk, calling `onToken(...)` with the partial content.
-   * 4) Accumulates tokens and, once streaming ends, saves the final message in the DB.
+   * Retrieve all conversations, locally or DB
+   */
+  static async getAllConversations(isLocalOnly: boolean = false) {
+    if (isLocalOnly) {
+      return this.getAllLocalConversations();
+    }
+
+    console.log("[ChatService] getAllConversations => DB");
+    try {
+      return await prisma.conversation.findMany({
+        orderBy: { createdAt: "desc" },
+      });
+    } catch (error) {
+      console.error("[ChatService] getAllConversations error:", error);
+      throw new Error("Failed to retrieve conversations.");
+    }
+  }
+
+  /**
+   * **SSE**: Streams chat completion from chosen AI model.
    */
   static async streamChatCompletion(
     req: AuthRequest,
     res: Response,
     conversationId: string,
     onToken: (token: string) => void,
-    model = "gpt-4o"
+    model = "gpt-4o",
+    isLocalOnly: boolean = false
   ): Promise<void> {
-    console.log("[ChatService] streamChatCompletion called with:", {
-      conversationId,
-      model,
-    });
-  
-    const perplexityModels = ['sonar-reasoning-pro', 'pplx-70b-chat', 'mixtral-8x7b-instruct'];
-    const openaiModels = ['gpt-4o', 'gpt-3.5-turbo'];
-  
-    const isPerplexity = perplexityModels.includes(model);
-    const client = isPerplexity ? perplexity : openai;
-    const currentUserId = req.user?.id || null;  // Now valid because req is typed as AuthRequest
+    console.log("[ChatService] streamChatCompletion =>", { conversationId, model });
+    const messages = await this.getMessagesForConversation(conversationId, isLocalOnly);
 
-    try {
-      // 1) Fetch past messages from the database
-      const messages = await this.getMessagesForConversation(conversationId);
-      if (!messages.length) {
-        console.log("[ChatService] No previous messages found.");
-      }
-  
-      // 2) Format messages according to the selected API
-      const formattedMessages = messages.map((m) => ({
-        role: m.role as "user" | "assistant" | "system",
-        content: m.content,
-      }));
-  
-      console.log(
-        `[ChatService] Sending ${isPerplexity ? "Perplexity" : "OpenAI"} request with model:`,
-        model
-      );
-  
-      // 3) Call the appropriate API with streaming enabled
-      let completion;
-      if (isPerplexity) {
-        completion = await perplexity.chat.completions.create({
-          model,
-          messages: formattedMessages,
-          temperature: 0.7,
-          stream: true, // Enable response streaming
-        });
-      } else {
-        completion = await openai.chat.completions.create({
-          model,
-          messages: formattedMessages,
-          temperature: 0.7,
-          stream: true, // Enable response streaming
-        });
-      }
-  
-      console.log(
-        `[ChatService] ${isPerplexity ? "Perplexity" : "OpenAI"} response streaming started...`
-      );
-  
-      let assistantContentBuffer = "";
-  
-      // 4) Read streamed response chunk by chunk
-      for await (const part of completion) {
-        const token = part.choices?.[0]?.delta?.content ?? "";
-        if (token) {
-          assistantContentBuffer += token;
-          onToken(token); // Send each token to frontend
+    if (!messages.length) {
+      console.log("[ChatService] No previous messages found.");
+    }
+
+    // Convert to ChatMessage
+    const chatMessages = messages.map((m) => ({
+      role: m.role as "user" | "assistant" | "system",
+      content: m.content,
+      timestamp: new Date()  // or m.createdAt || new Date()
+    }));
+
+    const provider = getAIProviderForModel(model);
+
+    let totalTokens = 0;
+    let assistantContent = "";
+
+    // 1) Stream from the provider
+    totalTokens = await provider.streamCompletion(chatMessages, model, (partialToken) => {
+      assistantContent += partialToken;
+      onToken(partialToken); // SSE write callback
+    });
+
+    // 2) If there's an assistant response, track usage & save
+    if (assistantContent.trim().length > 0) {
+      try {
+        if (req.user?.id) {
+          // track usage => may throw if AI service not found
+          await TokenTrackingService.trackTokenUsage(
+            req.user.id,
+            model,
+            totalTokens,
+            messages[messages.length - 1]?.content
+          );
         }
+      } catch (tokenErr) {
+        console.error("[ChatService] trackTokenUsage error:", tokenErr);
+        // Optional: you can re-throw if you want the controller to handle it
+        // throw tokenErr;
+        // OR just log & continue if usage tracking is non-critical
       }
-  
-      // 5) If there's a response, save it to the database
-      if (assistantContentBuffer.trim().length > 0) {
-        await this.addAssistantMessage(conversationId, assistantContentBuffer);
-        console.log("[ChatService] Assistant message saved.");
-      } else {
-        console.log("[ChatService] Assistant response was empty.");
-      }
-    } catch (error: any) {
-      console.error(
-        `[ChatService] Error while calling ${isPerplexity ? "Perplexity" : "OpenAI"}:`,
-        error
-      );
-  
-      if (error.response) {
-        console.error("API error response:", error.response.data);
-      }
-  
-      throw new Error(
-        `Failed to fetch response from ${isPerplexity ? "Perplexity" : "OpenAI"}.`
-      );
+
+      await this.addAssistantMessage(conversationId, assistantContent, isLocalOnly);
+      console.log("[ChatService] Assistant message saved. tokens used:", totalTokens);
+    } else {
+      console.log("[ChatService] Assistant returned empty content.");
     }
   }
 
-  /**
-   * Returns all conversations in descending order of creation.
-   * You could add filters (e.g., by userId) if needed.
-   */
-  static async getAllConversations() {
+  // ---------------------------------------
+  // Local storage helper methods
+  // ---------------------------------------
+  private static getLocalConversation(conversationId: string): LocalConversation | null {
+    const conversations = this.getAllLocalConversations();
+    return conversations.find(conv => conv.id === conversationId) || null;
+  }
+
+  private static getAllLocalConversations(): LocalConversation[] {
     try {
-      const conversations = await prisma.conversation.findMany({
-        orderBy: { createdAt: "desc" },
-      });
-      return conversations;
+      const data = localStorage.getItem(this.LOCAL_STORAGE_KEY);
+      return data ? JSON.parse(data) : [];
     } catch (error) {
-      console.error("[ChatService] Error fetching all conversations:", error);
-      throw new Error("Failed to retrieve conversations.");
+      console.error("[ChatService] Error reading local conversations:", error);
+      return [];
     }
+  }
+
+  private static saveLocalConversation(conversation: LocalConversation) {
+    const conversations = this.getAllLocalConversations();
+    const index = conversations.findIndex(conv => conv.id === conversation.id);
+    
+    if (index !== -1) {
+      conversations[index] = conversation;
+    } else {
+      conversations.push(conversation);
+    }
+
+    localStorage.setItem(this.LOCAL_STORAGE_KEY, JSON.stringify(conversations));
+  }
+
+  private static deleteLocalConversation(conversationId: string) {
+    const conversations = this.getAllLocalConversations();
+    const filtered = conversations.filter(conv => conv.id !== conversationId);
+    localStorage.setItem(this.LOCAL_STORAGE_KEY, JSON.stringify(filtered));
   }
 }

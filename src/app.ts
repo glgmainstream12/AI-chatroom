@@ -99,12 +99,12 @@ app.use("/uploads", express.static(path.join(__dirname, "..", "uploads"), {
 }));
 
 // API Routes
-app.use("/auth", authRouter);
-app.use("/chat", chatRouter);
-app.use("/upload", uploadRouter);
-app.use("/transcribe", transcribeRouter);
-app.use("/anon", anonymousChatRouter);
-app.use("/subscription", subscriptionRouter);
+app.use("/api/v1/auth", authRouter);
+app.use("/api/v1/chat", chatRouter);
+app.use("/api/v1/upload", uploadRouter);
+app.use("/api/v1/transcribe", transcribeRouter);
+app.use("/api/v1/anon", anonymousChatRouter);
+app.use("/api/v1/subscription", subscriptionRouter);
 
 // Health check endpoint with basic system info
 app.get('/health', (req, res) => {
