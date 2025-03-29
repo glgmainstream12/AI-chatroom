@@ -1,4 +1,5 @@
 // server/services/subscription.service.ts
+
 import axios from "axios";
 import prisma from "../prisma/client";
 import midtransClient from "midtrans-client";
@@ -7,61 +8,111 @@ import { v4 as uuidv4 } from "uuid";
 
 export class SubscriptionService {
   /**
-   * Create a subscription or fetch existing if pending, then call Midtrans Snap API
-   * to get a transaction token and redirect URL.
+   * createProPayment:
+   *  - If plan is daily/weekly/monthly => single-charge (/v2/charge) via Midtrans
+   *  - If plan is monthly subscription => recurring via /v1/subscriptions
    */
-  static async createSubscriptionPayment(
+  static async createProPayment(
     userId: string,
     planType: PlanType,
-    amount: number
+    paymentMethod?: string
   ) {
-    // 1) Create a new Subscription record with status PENDING (or fetch existing one)
-    //    Typically you'd do upsert or some logic to see if there's an existing PENDING sub.
-    const subscriptionId = uuidv4(); // e.g. "536fba6d-..."
-    const orderId = `SUB-${subscriptionId}-${Date.now()}`;
-    const now = new Date(); 
-    const subscription = await prisma.subscription.create({
-        data: {
-          id: subscriptionId,
-          orderId,
-          userId,
-          planType,
-          amount,
-          status: SubscriptionStatus.PENDING,
-          updatedAt: now,
-        },
-      });
+    // Determine price & allowed payment methods
+    let price = 0;
+    let isRecurring = false;
 
-    // 2) Build the payload for Midtrans
-    //    - We generate a unique order_id from subscription.id or subscription.orderId
-    //    - planType could appear in item_details as well
-    const serverKey = process.env.MIDTRANS_SERVER_KEY || "CHANGE_ME";
-    const body = {
+    switch (planType) {
+      case PlanType.PRO_DAILY:
+        price = 10000; // IDR 10,000
+        // Only QRIS
+        paymentMethod = "qris";
+        break;
+      case PlanType.PRO_WEEKLY:
+        price = 50000; // IDR 50,000
+        paymentMethod = "qris";
+        break;
+      case PlanType.PRO_MONTHLY:
+        price = 100000; // IDR 100,000
+        // default to qris if not specified
+        paymentMethod = paymentMethod === "credit_card" ? "credit_card" : "qris";
+        break;
+      case PlanType.PRO_MONTHLY_SUBSCRIPTION:
+        price = 90000; // IDR 90,000
+        isRecurring = true;
+        // default to "credit_card" if not specified
+        if (paymentMethod !== "gopay") {
+          paymentMethod = "credit_card";
+        }
+        break;
+      default:
+        // fallback or error
+        throw new Error(`Unsupported planType: ${planType}`);
+    }
+
+    // If it's a single-charge scenario => use /v2/charge
+    if (!isRecurring) {
+      return await this.createSingleCharge(userId, planType, price, paymentMethod!);
+    }
+    // Else if it's subscription => use /v1/subscriptions
+    else {
+      return await this.createRecurringSubscription(userId, planType, price, paymentMethod!);
+    }
+  }
+
+  /**
+   * createSingleCharge => calls Midtrans /v2/charge for one-time payments
+   */
+  private static async createSingleCharge(
+    userId: string,
+    planType: PlanType,
+    amount: number,
+    paymentType: string
+  ) {
+    // 1) Create a record in "Subscription" table or a separate "Transaction" table
+    const subscriptionId = uuidv4();
+    const orderId = `${planType}-${subscriptionId}}`;
+
+    // We'll store it in the Subscription table for convenience
+    const subscription = await prisma.subscription.create({
+      data: {
+        id: subscriptionId,
+        orderId,
+        userId,
+        planType,
+        amount,
+        status: SubscriptionStatus.PENDING,
+      },
+    });
+
+    // 2) Build the midtrans /v2/charge payload
+    // const serverKey = process.env.MIDTRANS_SERVER_KEY_BASE64;
+    const authHeader = process.env.MIDTRANS_SERVER_KEY_BASE64;
+    //  Buffer.from(`${serverKey}:`).toString("base64");
+    // console.log("Auth header:", authHeader);
+
+    // Payment type logic
+    let body: any = {
+      // payment_type: "qris",
       transaction_details: {
         order_id: orderId,
-        gross_amount: amount, // total price
-      },
-      // item_details is optional but recommended for clarity
-      item_details: [
-        {
-          id: planType,
-          price: amount,
-          quantity: 1,
-          name: `Subscription ${planType}`,
-        },
-      ],
-      customer_details: {
-        // fetch user info if needed
-      },
-      credit_card: {
-        secure: true,
-      },
+        gross_amount: amount,
+      }
     };
 
-    // 3) Call Midtrans Snap API via Axios
-    const url = "https://app.sandbox.midtrans.com/snap/v1/transactions";
-    const authHeader = Buffer.from(`${serverKey}:`).toString("base64"); // Basic <base64(serverKey:)>
+    if (paymentType === "qris") {
+      body.payment_type = "qris";
+      // For QRIS, typically "acquirer" = "gopay"
+      body.qris = { acquirer: "gopay" };
+    } else if (paymentType === "credit_card") {
+      body.payment_type = "credit_card";
+      body.credit_card = {
+        secure: true,
+      };
+    } else {
+      throw new Error(`Unsupported single-charge paymentType: ${paymentType}`);
+    }
 
+    const url = "https://api.sandbox.midtrans.com/v2/charge";
     const response = await axios.post(url, body, {
       headers: {
         Accept: "application/json",
@@ -70,97 +121,169 @@ export class SubscriptionService {
       },
     });
 
-    const { token, redirect_url } = response.data;
-
-    // 4) Update subscription with the generated orderId and paymentToken
-    const updatedSubscription = await prisma.subscription.update({
-      where: { id: subscription.id },
+    // 3) Save response info (if needed: qr_url, etc.)
+    const midtransData = response.data;
+    // Example: for QRIS, we might store midtransData.qris.qr_url
+    await prisma.subscription.update({
+      where: { id: subscriptionId },
       data: {
-        orderId: orderId, // store that unique order id
-        paymentToken: token,
+        paymentToken: midtransData?.token || null, // or store transaction_id
       },
     });
 
-    // 5) Return the relevant data
+    // 4) Return relevant data to frontend
     return {
-      subscription: updatedSubscription,
-      snapToken: token,
-      redirectUrl: redirect_url,
+      subscriptionId,
+      orderId,
+      status: SubscriptionStatus.PENDING,
+      midtransResponse: midtransData,
     };
   }
 
   /**
-   * Handle Midtrans notification
-   * - Verifies transaction status
-   * - Updates subscription status
-   * - Optionally, update user planType or subscriptionEnd
+   * createRecurringSubscription => calls Midtrans /v1/subscriptions
+   * For "PRO_SUBSCRIPTION" with monthly recurring.
+   * Payment method can be "credit_card" or "gopay" (needs extra setup).
    */
-  static async handleMidtransNotification(notificationBody: any) {
-    // 1) Use midtrans-client's CoreApi to parse the notification
-    const coreApi = new midtransClient.CoreApi({
-      isProduction: false, // or true for production
-      serverKey: process.env.MIDTRANS_SERVER_KEY || "",
-      clientKey: process.env.MIDTRANS_CLIENT_KEY || "",
+  private static async createRecurringSubscription(
+    userId: string,
+    planType: PlanType,
+    amount: number,
+    payMethod: string
+  ) {
+    // 1) Create subscription record in DB
+    const subscriptionId = uuidv4();
+    const now = new Date();
+    const subscription = await prisma.subscription.create({
+      data: {
+        id: subscriptionId,
+        orderId: subscriptionId, // or your format
+        userId,
+        planType,
+        amount,
+        status: SubscriptionStatus.PENDING,
+      },
     });
 
-    const statusResponse = await coreApi.transaction.notification(
-      notificationBody
-    );
-    const orderId = statusResponse.order_id; // "SUB-<subscriptionId>-<timestamp>"
+    // 2) Build midtrans subscription payload
+    // For credit_card or gopay recurring, you generally need a token or "payment_type"
+    // This minimal example shows how you'd build it if you already have the card token.
+    // const serverKey = process.env.MIDTRANS_SERVER_KEY;
+    const authHeader = process.env.MIDTRANS_SERVER_KEY_BASE64;
+
+    const body: any = {
+      name: "Pro Monthly Subscription",
+      amount: amount.toString(),
+      currency: "IDR",
+      // "credit_card" or "gopay"
+      payment_type: payMethod,
+      token: "<some-card-token-or-gopay-token>",
+      schedule: {
+        interval: 1,
+        interval_unit: "month",
+        start_time: new Date(now.getTime() + 5_000).toISOString(), // e.g. start in 5s
+      },
+      metadata: {
+        description: "Pro subscription plan",
+      },
+      customer_details: {
+        first_name: "YourUser",
+        email: "user@example.com",
+        // ...
+      },
+    };
+
+    const url = "https://api.sandbox.midtrans.com/v1/subscriptions";
+    const response = await axios.post(url, body, {
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+        Authorization: `Basic ${authHeader}`,
+      },
+    });
+
+    const midtransData = response.data;
+    // midtransData.id is the "subscription_id" in Midtrans
+    const midtransSubscriptionId = midtransData.id; 
+
+    // 3) Optionally store that ID in DB
+    await prisma.subscription.update({
+      where: { id: subscription.id },
+      data: {
+        // store subscription "id" from midtrans, or any token
+        paymentToken: midtransSubscriptionId,
+      },
+    });
+
+    return {
+      subscriptionId,
+      midtransSubscriptionId,
+      midtransResponse: midtransData,
+    };
+  }
+
+  /**
+   * handleMidtransNotification => same as original,
+   *  to update subscription status in DB, set user plan, etc.
+   */
+  static async handleMidtransNotification(notificationBody: any) {
+    // ... same code as your existing logic ...
+    if (!process.env.MIDTRANS_SERVER_KEY || !process.env.MIDTRANS_CLIENT_KEY) {
+      throw new Error('MIDTRANS_SERVER_KEY and MIDTRANS_CLIENT_KEY must be set');
+    }
+    const coreApi = new midtransClient.CoreApi({
+      isProduction: false,
+      serverKey: process.env.MIDTRANS_SERVER_KEY,
+      clientKey: process.env.MIDTRANS_CLIENT_KEY,
+    });
+
+    const statusResponse = await coreApi.transaction.notification(notificationBody);
+    const orderId = statusResponse.order_id; // e.g., "PRO-PRO_DAILY-<uuid>-<timestamp>" or if subscription monthly "SUB-..."
     const transactionStatus = statusResponse.transaction_status;
     const fraudStatus = statusResponse.fraud_status;
 
-    // 2) Extract the subscriptionId from order_id
-    //    e.g. "SUB-<subscriptionId>-<timestamp>"
+    // parse subscriptionId from order_id or from your storing logic
+    // e.g. "PRO-PRO_MONTHLY-<uuid>-<timestamp>"
     const splitted = orderId.split("-");
     if (splitted.length < 3) {
       throw new Error("Invalid order_id format");
     }
-    const subscriptionId = splitted[1]; // The string between "SUB-" and "-timestamp"
+    // splitted[2] might be your <uuid>, depending how you structured it.
+    const subscriptionId = splitted[2]; 
 
-    // 3) Fetch the subscription from DB
+    // fetch from DB
     const subscription = await prisma.subscription.findUnique({
       where: { id: subscriptionId },
-      include: { User: true }, // if you want user info
+      include: { User: true },
     });
     if (!subscription) {
-      throw new Error("Subscription not found");
+      throw new Error("Subscription not found in DB");
     }
 
-    // 4) Determine the new subscription status
+    // determine new status
     let newStatus: SubscriptionStatus | null = null;
-
     if (transactionStatus === "settlement") {
       newStatus = SubscriptionStatus.ACTIVE;
-    } else if (
-      ["cancel", "expire", "deny"].includes(transactionStatus)
-    ) {
+    } else if (["cancel", "expire", "deny"].includes(transactionStatus)) {
       newStatus = SubscriptionStatus.FAILED;
     } else if (transactionStatus === "pending") {
       newStatus = SubscriptionStatus.PENDING;
     } else if (transactionStatus === "capture") {
-      // If credit card transaction, might see "capture"
       if (fraudStatus === "accept") {
         newStatus = SubscriptionStatus.ACTIVE;
       } else if (fraudStatus === "challenge") {
-        // Possibly still pending or under manual review
         newStatus = SubscriptionStatus.PENDING;
       }
     }
 
     if (newStatus) {
-      // 5) Update the subscription in DB
       const updatedSub = await prisma.subscription.update({
         where: { id: subscription.id },
         data: { status: newStatus },
       });
 
-      // 6) If subscription is now ACTIVE, you might want to:
-      //    - update user.planType
-      //    - set subscriptionEnd
+      // If now active, optionally update user's planType & subscriptionEnd
       if (newStatus === SubscriptionStatus.ACTIVE) {
-        // Example: set user planType to subscription's planType,
-        // and extend subscriptionEnd by 30 days (or 1 year)
         const oneMonthFromNow = new Date();
         oneMonthFromNow.setDate(oneMonthFromNow.getDate() + 30);
 
@@ -172,11 +295,9 @@ export class SubscriptionService {
           },
         });
       }
-
       return updatedSub;
     }
 
-    // 7) If no recognized status, just return existing sub
     return subscription;
   }
 }

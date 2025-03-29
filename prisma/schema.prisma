@@ -90,7 +90,7 @@ model User {
   password           String
   name               String?
   role               UserRole     @default(USER)
-  planType           PlanType     @default(FREE)
+  planType PlanType @default(FREE) // Now references the updated enum
   tokenUsed          Int          @default(0)
   tokenResetAt       DateTime?
   subscriptionEnd    DateTime?
@@ -115,8 +115,10 @@ model User {
 
 enum PlanType {
   FREE
-  STUDENT
-  PREMIUM
+  PRO_DAILY
+  PRO_WEEKLY
+  PRO_MONTHLY
+  PRO_MONTHLY_SUBSCRIPTION
 }
 
 enum SubscriptionStatus {

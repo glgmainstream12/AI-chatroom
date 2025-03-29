@@ -135,7 +135,13 @@ export class ChatController {
    */
   static getAllConversations: RequestHandler = async (req, res) => {
     try {
-      const conversations = await ChatService.getAllConversations(false);
+      // We have to cast `req` as `AuthRequest` to access `req.user`.
+      const authReq = req as AuthRequest;
+  
+      // Pass the userId to the service:
+      // (The second argument `false` is your existing isLocalOnly flag if you still need it.)
+      const conversations = await ChatService.getAllConversations(authReq.user?.id, false);
+  
       res.json(conversations);
     } catch (error) {
       console.error("[ChatController] Error in getAllConversations:", error);

@@ -60,7 +60,7 @@ export interface AIProvider {
  * Example: store the actual model endpoint names if needed.
  * For OpenAI, we might have "gpt-4o" or "gpt-3.5-turbo".
  */
-const OPENAI_MODELS = new Set(["gpt-4o", "gpt-3.5-turbo"]);
+const OPENAI_MODELS = new Set(["gpt-4o", "gpt-3.5-turbo", "gpt-4o-mini"]);
 
 /**
  * The OpenAI provider implementation

@@ -209,14 +209,29 @@ export class ChatService {
   /**
    * Retrieve all conversations, locally or DB
    */
-  static async getAllConversations(isLocalOnly: boolean = false) {
+  static async getAllConversations(
+    userId: string | undefined, 
+    isLocalOnly: boolean = false
+  ) {
     if (isLocalOnly) {
       return this.getAllLocalConversations();
     }
-
+  
     console.log("[ChatService] getAllConversations => DB");
     try {
+      // If userId is missing, handle the scenario (e.g., return an empty array or throw an error).
+      // Typically userId will be defined if the user is authenticated.
+      if (!userId) {
+        // Option A: Return empty
+        // return [];
+        
+        // Option B: Throw an error
+        throw new Error("No user ID provided");
+      }
+  
+      // Filter by userId so users only see their own conversations
       return await prisma.conversation.findMany({
+        where: { userId },
         orderBy: { createdAt: "desc" },
       });
     } catch (error) {

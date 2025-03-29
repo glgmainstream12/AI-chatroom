@@ -1,68 +1,66 @@
 // server/controllers/subscription.controller.ts
-import { Request, Response, NextFunction, RequestHandler } from "express";
-import { PlanType, SubscriptionStatus } from "@prisma/client";
+
+import { Request, Response } from "express";
 import { SubscriptionService } from "../services/subscription.service";
+import { AuthRequest } from "../middlewares/auth.middleware";
+import { PlanType } from "@prisma/client";
 
 export class SubscriptionController {
   /**
-   * Creates a subscription for a given plan, calls Midtrans to get Snap token & redirect URL
+   * Create a new subscription/payment. 
+   * - e.g. daily, weekly, monthly single-charge, or a recurring subscription
+   * - Body typically includes { planType, paymentMethod } 
    */
-  public static createSubscriptionPayment: RequestHandler = async (req, res, next) => {
+  static async createSubscriptionPayment(req: Request, res: Response): Promise<void> {
     try {
-      // 1) The userId is typically from req.user if you have JWT-based auth
-      const userId = (req as any).user?.id; // Or whatever your auth logic sets
-      if (!userId) {
-        res.status(401).json({ error: "Not authenticated" });
+      // Cast request to AuthRequest if you rely on req.user
+      const authReq = req as AuthRequest;
+      if (!authReq.user) {
+        res.status(401).json({ error: "Unauthorized" });
         return;
       }
 
-      // 2) We expect planType & amount from body (or derive amount from planType)
-      const { planType, amount } = req.body;
-      if (!planType || !Object.values(PlanType).includes(planType)) {
-        res.status(400).json({ error: "Invalid planType" });
+      const { planType, paymentMethod } = req.body;
+
+      // Validate planType if you have multiple plan enums
+      if (!planType) {
+        res.status(400).json({ error: "planType is required" });
         return;
       }
-      if (!amount || typeof amount !== "number") {
-        res.status(400).json({ error: "Invalid amount" });
+      if (!Object.values(PlanType).includes(planType)) {
+        res.status(400).json({ error: `Invalid planType: ${planType}` });
         return;
       }
 
-      // 3) Create subscription & get midtrans token
-      const result = await SubscriptionService.createSubscriptionPayment(
-        userId,
-        planType,
-        amount
+      // Create the subscription or single-charge payment
+      const result = await SubscriptionService.createProPayment(
+        authReq.user.id,
+        planType as PlanType,
+        paymentMethod
       );
 
-      res.json({
-        success: true,
-        subscription: result.subscription,
-        snapToken: result.snapToken,
-        redirectUrl: result.redirectUrl,
-      });
-      return; // make sure we return void
-    } catch (error) {
-      next(error);
+      // Return the relevant data (e.g., Snap token or subscription info)
+      res.json(result);
+    } catch (error: any) {
+      console.error("[SubscriptionController] createSubscriptionPayment error:", error);
+      res.status(500).json({ error: error.message || "Internal server error" });
     }
-  };
+  }
 
   /**
-   * Midtrans will send POST notifications to this endpoint.
-   * We'll parse the transaction and update subscription status.
+   * Handle Midtrans notification (e.g. settlement, pending, cancel, etc.)
+   * - Typically called by Midtrans webhook
    */
-  public static handleMidtransNotification: RequestHandler = async (req, res, next) => {
+  static async handleMidtransNotification(req: Request, res: Response): Promise<void> {
     try {
-      const notification = req.body;
-      const updatedSubscription = await SubscriptionService.handleMidtransNotification(notification);
+      // Pass the request body to your service method
+      const updatedSubscription = await SubscriptionService.handleMidtransNotification(req.body);
 
-      // Return 200 so Midtrans knows we handled it
-      res.status(200).json({
-        success: true,
-        subscription: updatedSubscription,
-      });
-      return; // make sure we return void
-    } catch (error) {
-      next(error);
+      // Return a simple response to acknowledge
+      res.json({ status: "ok", updatedSubscription });
+    } catch (error: any) {
+      console.error("[SubscriptionController] handleMidtransNotification error:", error);
+      res.status(500).json({ error: error.message || "Internal server error" });
     }
-  };
+  }
 }

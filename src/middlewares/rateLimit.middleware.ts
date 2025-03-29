@@ -23,15 +23,20 @@ export const rateLimit: RequestHandler = async (req, res, next): Promise<void> =
       res.status(401).json({ error: "User not found" });
       return;
     }
+    
 
     // Premium users have no rate limit
-    if (user.planType === "PREMIUM") {
-      next();
-      return;
+    if (
+      user.planType === "PRO_DAILY" ||
+      user.planType === "PRO_WEEKLY" ||
+      user.planType === "PRO_MONTHLY" ||
+      user.planType === "PRO_MONTHLY_SUBSCRIPTION"
+    ) {
+      return next(); // skip rate limiting
     }
 
     // Free or Student users are limited to 15 prompts per 30 minutes
-    const maxAllowed = 15;
+    const maxAllowed = 10;
 
     // Check if token usage should be reset
     const shouldReset =
@@ -49,12 +54,12 @@ export const rateLimit: RequestHandler = async (req, res, next): Promise<void> =
       user.tokenUsed = 0;
     }
 
-    if (user.tokenUsed >= maxAllowed) {
-      res.status(429).json({
-        error: "Rate limit exceeded. Please wait 30 minutes or upgrade.",
-      });
-      return;
-    }
+    // if (user.tokenUsed >= maxAllowed) {
+    //   res.status(429).json({
+    //     error: "Rate limit exceeded. Please wait 30 minutes or upgrade.",
+    //   });
+    //   return;
+    // }
 
     // Increment usage
     await prisma.user.update({
